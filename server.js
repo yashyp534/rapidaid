@@ -10,11 +10,11 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, '../Frontend/public')));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // EJS Setup
 app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, '../Frontend/views'));
+app.set('views', path.join(__dirname, 'views'));
 
 // Session Config
 app.use(session({
@@ -31,7 +31,8 @@ app.use((req, res, next) => {
 });
 
 // Database Connection
-mongoose.connect('mongodb://127.0.0.1:27017/rapidaidDB')
+const mongoURI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/rapidaidDB';
+mongoose.connect(mongoURI)
 .then(() => {
     console.log("MongoDB Connected");
 })
