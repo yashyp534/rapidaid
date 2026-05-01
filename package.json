@@ -20,6 +20,6 @@
     "ejs": "^5.0.2",
     "express": "^5.2.1",
     "express-session": "^1.19.0",
-    "mongoose": "^9.5.0"
+    "firebase": "^12.12.1"
   }
 }

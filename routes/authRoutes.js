@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
-const User = require('../models/User');
+const { db } = require('../firebase');
+const { collection, getDocs, query, where, addDoc } = require('firebase/firestore');
 
 // Middleware to redirect logged in users
 const redirectIfLoggedIn = (req, res, next) => {
@@ -34,10 +35,17 @@ router.get('/login', redirectIfLoggedIn, (req, res) => {
 router.post('/login', async (req, res) => {
     const { email, password, role } = req.body;
     try {
-        const user = await User.findOne({ email, role });
-        if (!user) {
+        const usersRef = collection(db, 'users');
+        const q = query(usersRef, where('email', '==', email), where('role', '==', role));
+        const querySnapshot = await getDocs(q);
+        
+        if (querySnapshot.empty) {
             return res.render('login', { role, error: 'Invalid credentials or wrong role selected.' });
         }
+        
+        const userDoc = querySnapshot.docs[0];
+        const user = userDoc.data();
+        user._id = userDoc.id;
         
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
@@ -71,37 +79,31 @@ router.post('/signup', async (req, res) => {
             return res.render('signup', { role, error: 'All fields are required.' });
         }
 
-        let user = await User.findOne({ email });
-        if (user) {
+        const usersRef = collection(db, 'users');
+        const q = query(usersRef, where('email', '==', email));
+        const querySnapshot = await getDocs(q);
+        
+        if (!querySnapshot.empty) {
             return res.render('signup', { role, error: 'Email already exists.' });
         }
 
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
-        user = new User({
+        const userData = {
             name,
             email,
             password: hashedPassword,
-            role
-        });
+            role,
+            rejectedRequests: [],
+            createdAt: new Date().toISOString()
+        };
 
-        await user.save();
+        await addDoc(usersRef, userData);
         res.redirect(`/login?role=${role}`);
     } catch (err) {
         console.error("Signup Error:", err);
-        let errorMsg = 'Server error. Please try again later.';
-        
-        if (err.name === 'ValidationError') {
-            errorMsg = Object.values(err.errors).map(e => e.message).join(', ');
-        } else if (err.code === 11000) {
-            errorMsg = 'Email already exists.';
-        } else {
-            // Temporarily show full error for debugging
-            errorMsg = `Server Error: ${err.name} - ${err.message}`;
-        }
-        
-        res.render('signup', { role, error: errorMsg });
+        res.render('signup', { role, error: 'Server error. Please try again later.' });
     }
 });
 

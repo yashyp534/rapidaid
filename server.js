@@ -1,5 +1,5 @@
 const express = require('express');
-const mongoose = require('mongoose');
+
 const session = require('express-session');
 const path = require('path');
 require('dotenv').config();
@@ -30,15 +30,8 @@ app.use((req, res, next) => {
     next();
 });
 
-// Database Connection
-const mongoURI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/rapidaidDB';
-mongoose.connect(mongoURI)
-.then(() => {
-    console.log("MongoDB Connected");
-})
-.catch(err => {
-    console.error("MongoDB Connection Error:", err);
-});
+// Firebase Database Connection is initialized in firebase.js
+require('./firebase');
 
 // Routes
 const authRoutes = require('./routes/authRoutes');

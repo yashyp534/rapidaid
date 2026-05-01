@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const EmergencyRequest = require('../models/EmergencyRequest');
-const User = require('../models/User');
+const { db } = require('../firebase');
+const { collection, getDocs, getDoc, doc, updateDoc, query, where } = require('firebase/firestore');
 
 // Middleware to check if user is logged in and has role 'ambulance'
 const requireAmbulance = (req, res, next) => {
@@ -16,19 +16,27 @@ router.use(requireAmbulance);
 // Ambulance Dashboard
 router.get('/dashboard', async (req, res) => {
     try {
-        const ambulance = await User.findById(req.session.userId);
+        const userDocRef = doc(db, 'users', req.session.userId);
+        const userDoc = await getDoc(userDocRef);
+        const ambulance = userDoc.data();
         const rejectedRequests = ambulance.rejectedRequests || [];
 
+        const requestsRef = collection(db, 'emergencyRequests');
+        
         // Incoming nearby requests (all pending excluding rejected by this ambulance)
-        const incomingRequests = await EmergencyRequest.find({
-            status: 'pending',
-            _id: { $nin: rejectedRequests }
-        }).sort({ createdAt: -1 });
+        const pendingQ = query(requestsRef, where('status', '==', 'pending'));
+        const pendingSnap = await getDocs(pendingQ);
+        let incomingRequests = pendingSnap.docs
+            .map(d => ({ _id: d.id, ...d.data() }))
+            .filter(req => !rejectedRequests.includes(req._id));
+            
+        incomingRequests.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
         // History (accepted or completed by this ambulance)
-        const historyRequests = await EmergencyRequest.find({
-            acceptedBy: req.session.userId
-        }).sort({ createdAt: -1 });
+        const historyQ = query(requestsRef, where('acceptedBy', '==', req.session.userId));
+        const historySnap = await getDocs(historyQ);
+        let historyRequests = historySnap.docs.map(d => ({ _id: d.id, ...d.data() }));
+        historyRequests.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
         res.render('ambulance/dashboard', { incomingRequests, historyRequests });
     } catch (err) {
@@ -40,11 +48,14 @@ router.get('/dashboard', async (req, res) => {
 // Accept Request POST
 router.post('/accept/:id', async (req, res) => {
     try {
-        const emergencyRequest = await EmergencyRequest.findById(req.params.id);
-        if (emergencyRequest && emergencyRequest.status === 'pending') {
-            emergencyRequest.status = 'accepted';
-            emergencyRequest.acceptedBy = req.session.userId;
-            await emergencyRequest.save();
+        const reqRef = doc(db, 'emergencyRequests', req.params.id);
+        const reqSnap = await getDoc(reqRef);
+        
+        if (reqSnap.exists() && reqSnap.data().status === 'pending') {
+            await updateDoc(reqRef, {
+                status: 'accepted',
+                acceptedBy: req.session.userId
+            });
         }
         res.redirect(`/ambulance/tracking/${req.params.id}`);
     } catch (err) {
@@ -56,10 +67,13 @@ router.post('/accept/:id', async (req, res) => {
 // Reject Request POST
 router.post('/reject/:id', async (req, res) => {
     try {
-        const ambulance = await User.findById(req.session.userId);
-        if (!ambulance.rejectedRequests.includes(req.params.id)) {
-            ambulance.rejectedRequests.push(req.params.id);
-            await ambulance.save();
+        const userDocRef = doc(db, 'users', req.session.userId);
+        const userDoc = await getDoc(userDocRef);
+        let rejectedRequests = userDoc.data().rejectedRequests || [];
+        
+        if (!rejectedRequests.includes(req.params.id)) {
+            rejectedRequests.push(req.params.id);
+            await updateDoc(userDocRef, { rejectedRequests });
         }
         res.redirect('/ambulance/dashboard');
     } catch (err) {
@@ -71,15 +85,14 @@ router.post('/reject/:id', async (req, res) => {
 // Tracking Page
 router.get('/tracking/:id', async (req, res) => {
     try {
-        const emergencyRequest = await EmergencyRequest.findOne({
-            _id: req.params.id,
-            acceptedBy: req.session.userId,
-            status: { $in: ['accepted', 'reached', 'completed'] }
-        });
-
-        if (!emergencyRequest) {
+        const reqRef = doc(db, 'emergencyRequests', req.params.id);
+        const reqSnap = await getDoc(reqRef);
+        
+        if (!reqSnap.exists() || reqSnap.data().acceptedBy !== req.session.userId || !['accepted', 'reached', 'completed'].includes(reqSnap.data().status)) {
             return res.redirect('/ambulance/dashboard');
         }
+        
+        const emergencyRequest = { _id: reqSnap.id, ...reqSnap.data() };
 
         // Static dataset for 5 nearest hospitals
         const nearestHospitals = [
@@ -100,14 +113,14 @@ router.get('/tracking/:id', async (req, res) => {
 // Reached Patient POST
 router.post('/reached/:id', async (req, res) => {
     try {
-        const emergencyRequest = await EmergencyRequest.findOneAndUpdate(
-            { _id: req.params.id, acceptedBy: req.session.userId, status: 'accepted' },
-            { status: 'reached' },
-            { new: true }
-        );
-        if (!emergencyRequest) {
+        const reqRef = doc(db, 'emergencyRequests', req.params.id);
+        const reqSnap = await getDoc(reqRef);
+        
+        if (!reqSnap.exists() || reqSnap.data().acceptedBy !== req.session.userId || reqSnap.data().status !== 'accepted') {
             return res.status(404).json({ success: false, message: 'Request not found or already reached' });
         }
+        
+        await updateDoc(reqRef, { status: 'reached' });
         res.json({ success: true, status: 'reached' });
     } catch (err) {
         console.error(err);
@@ -119,14 +132,16 @@ router.post('/reached/:id', async (req, res) => {
 router.post('/complete/:id', async (req, res) => {
     try {
         const { hospitalName } = req.body;
-        const emergencyRequest = await EmergencyRequest.findOneAndUpdate(
-            { _id: req.params.id, acceptedBy: req.session.userId },
-            { 
+        const reqRef = doc(db, 'emergencyRequests', req.params.id);
+        const reqSnap = await getDoc(reqRef);
+        
+        if (reqSnap.exists() && reqSnap.data().acceptedBy === req.session.userId) {
+            await updateDoc(reqRef, {
                 status: 'completed',
                 hospitalAdmitted: hospitalName
-            },
-            { new: true }
-        );
+            });
+        }
+        
         res.redirect('/ambulance/dashboard');
     } catch (err) {
         console.error(err);
